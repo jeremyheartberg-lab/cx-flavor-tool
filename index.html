@@ -39,7 +39,7 @@
 <body>
   <h1>CX Flavor Tool (Order Mapper • Nutrition • Ingredients)</h1>
 
-  <!-- Minimal status strip (replaces "Load data" section) -->
+  <!-- Minimal status strip -->
   <div class="card">
     <div class="split">
       <div>
@@ -85,8 +85,8 @@ x 2"></textarea>
   <div class="row" style="margin-top:12px;">
     <div class="card grow">
       <h2>Ingredient Lookup</h2>
-      <div class="muted">Fuzzy ingredient search. General query returns all forms/variants found in ingredient columns.</div>
-      <input id="ingredientQuery" type="text" placeholder="e.g., chocolate chips, cocoa, cinnamon" />
+      <div class="muted">Fuzzy ingredient search. Handles plurals (raspberry/raspberries, strawberry/strawberries).</div>
+      <input id="ingredientQuery" type="text" placeholder="e.g., raspberry, strawberries, cocoa, cinnamon" />
       <div style="margin-top:10px;" class="split">
         <button id="searchIngredient" disabled>Search</button>
         <label class="muted"><input id="includeInactiveIng" type="checkbox" /> include inactive</label>
@@ -133,7 +133,7 @@ x 2"></textarea>
         <input id="tableSearch" type="text" placeholder="Search table…" />
       </div>
     </div>
-    <div class="muted">Click a header to sort.</div>
+    <div class="muted">Click a header to sort. Table shows only items with nutrition values.</div>
     <div style="overflow:auto; margin-top:10px;">
       <table id="flavorTable"></table>
     </div>
@@ -179,11 +179,76 @@ x 2"></textarea>
       if (!iso) return "";
       const d = new Date(iso);
       if (Number.isNaN(d.getTime())) return iso;
-      // Local time formatting
       return d.toLocaleString(undefined, {
         year: "numeric", month: "2-digit", day: "2-digit",
         hour: "2-digit", minute: "2-digit"
       });
+    }
+
+    // --- Simple stemming for better plural matching (ingredients) ---
+    function singularize(word) {
+      let w = (word || "").toLowerCase();
+
+      // strawberries -> strawberry, raspberries -> raspberry
+      if (w.endsWith("ies") && w.length > 3) return w.slice(0, -3) + "y";
+
+      // powders -> powder, boxes -> box (conservative)
+      if (w.endsWith("es") && w.length > 3) return w.slice(0, -2);
+
+      // oats -> oat, chips -> chip
+      if (w.endsWith("s") && w.length > 3 && !w.endsWith("ss")) return w.slice(0, -1);
+
+      return w;
+    }
+
+    function pluralize(word) {
+      let w = (word || "").toLowerCase();
+      if (!w) return w;
+
+      // raspberry -> raspberries, strawberry -> strawberries
+      if (w.endsWith("y") && w.length > 2) return w.slice(0, -1) + "ies";
+
+      return w + "s";
+    }
+
+    function stemToken(word) {
+      let w = singularize(word);
+
+      // powdered -> powder (rough)
+      if (w.endsWith("ed") && w.length > 4) w = w.slice(0, -2);
+
+      // mixing -> mix (rough)
+      if (w.endsWith("ing") && w.length > 5) w = w.slice(0, -3);
+
+      return w;
+    }
+
+    function tokenSetStemmed(s) {
+      const cleaned = norm(s);
+      const tokens = cleaned.split(" ").filter(Boolean).map(stemToken);
+      return new Set(tokens.filter(Boolean));
+    }
+
+    function stemmedString(s) {
+      return [...tokenSetStemmed(s)].join(" ");
+    }
+
+    // NEW: build query token variants (singular + plural + original)
+    function queryTokenVariants(token) {
+      const t = norm(token);
+      if (!t) return [];
+      const s = singularize(t);
+      const p = pluralize(s);
+      return [...new Set([t, s, p])].filter(Boolean);
+    }
+
+    function queryVariantsString(query) {
+      const tokens = norm(query).split(" ").filter(Boolean);
+      const variants = new Set();
+      for (const tok of tokens) {
+        for (const v of queryTokenVariants(tok)) variants.add(v);
+      }
+      return [...variants];
     }
 
     // Very small fuzzy score (0..1). Combination of substring + token overlap + char overlap.
@@ -205,6 +270,37 @@ x 2"></textarea>
       const cJacc = cInter / cUnion;
 
       return Math.max(jacc * 0.75 + cJacc * 0.25, 0);
+    }
+
+    // Ingredient-specific fuzzy score (handles plurals like raspberry/raspberries)
+    function ingredientScore(query, ingredientCell) {
+      const qNorm = norm(query);
+      const iNorm = norm(ingredientCell);
+      if (!qNorm || !iNorm) return 0;
+
+      // NEW: token-variant substring check first
+      const qVars = queryVariantsString(query);
+      for (const v of qVars) {
+        if (v && iNorm.includes(v)) return 0.96;
+      }
+
+      // Stemmed substring fallback
+      const qStem = stemmedString(qNorm);
+      const iStem = stemmedString(iNorm);
+      if (qStem && iStem && iStem.includes(qStem)) return 0.93;
+
+      // Token overlap (stemmed)
+      const qt = tokenSetStemmed(qNorm);
+      const it = tokenSetStemmed(iNorm);
+
+      const inter = [...qt].filter(x => it.has(x)).length;
+      const union = new Set([...qt, ...it]).size || 1;
+      const jacc = inter / union;
+
+      // Blend with base fuzzyScore for misspellings
+      const base = fuzzyScore(qNorm, iNorm);
+
+      return Math.max(0, jacc * 0.75 + base * 0.25);
     }
 
     function bestFuzzyMatch(query, candidates) {
@@ -319,7 +415,6 @@ x 2"></textarea>
       for (const id of ["mapOrder","lookupLabel","searchIngredient","calcExtremes"]) {
         document.getElementById(id).disabled = !on;
       }
-      // If we already have data, keep refresh enabled regardless
       document.getElementById("refreshData").disabled = false;
     }
 
@@ -548,7 +643,6 @@ x 2"></textarea>
      **********************/
     function searchIngredient() {
       const qRaw = document.getElementById("ingredientQuery").value;
-      const q = norm(qRaw);
       const includeInactive = document.getElementById("includeInactiveIng").checked;
 
       const pool = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
@@ -560,11 +654,11 @@ x 2"></textarea>
         let bestVariant = null;
 
         for (const ing of f.ingredients) {
-          const sc = fuzzyScore(q, ing);
+          const sc = ingredientScore(qRaw, ing);
           if (sc > best) { best = sc; bestVariant = ing; }
         }
 
-        if (best >= 0.62) {
+        if (best >= 0.58) {
           hits.push({ flavor: f.flavor_name, status: f.status, score: best, variant: bestVariant });
           matchedVariants.set(bestVariant, (matchedVariants.get(bestVariant) || 0) + 1);
         }
@@ -716,7 +810,7 @@ x 2"></textarea>
     }
 
     /**********************
-     * Google Sheets loader (hardcoded URL)
+     * Google Sheets loader
      **********************/
     async function loadFromGoogleSheet() {
       setLoadStatus("Loading from Google Sheets…");
@@ -724,7 +818,6 @@ x 2"></textarea>
       try {
         const res = await fetch(SHEET_API_URL);
         const text = await res.text();
-
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -774,9 +867,8 @@ x 2"></textarea>
     // Auto-load immediately
     loadFromGoogleSheet();
 
-    // Auto-refresh every N minutes
+    // Auto-refresh every N minutes (only when tab visible)
     setInterval(() => {
-      // Keep it polite: only refresh if the tab is visible
       if (document.visibilityState === "visible") loadFromGoogleSheet();
     }, AUTO_REFRESH_MINUTES * 60 * 1000);
   </script>
