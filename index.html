@@ -311,6 +311,17 @@ x 2"></textarea>
       }
       return best;
     }
+    function bestFuzzyMatchObj(query, objects, getField) {
+  let best = null;
+  for (const obj of objects) {
+    const val = (getField(obj) ?? "").toString();
+    if (!val.trim()) continue;
+    const sc = fuzzyScore(query, val);
+    if (!best || sc > best.score) best = { obj, value: val, score: sc };
+  }
+  return best;
+}
+
 
     /**********************
      * Warehouse-line parsing
@@ -558,45 +569,66 @@ x 2"></textarea>
     }
 
     function mapOrder() {
-      const includeInactive = false;
-      const input = document.getElementById("orderInput").value;
-      const items = parseOrder(input);
+  const includeInactive = false;
+  const input = document.getElementById("orderInput").value;
+  const items = parseOrder(input);
 
-      const candidates = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
+  const candidates = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
 
-      const out = [];
-      const notes = [];
+  const out = [];
+  const notes = [];
 
-      for (const it of items) {
-        let text = it.name;
-        if (it.source === "warehouse") text = cleanWarehouseItemName(text);
-        text = applyAlias(text);
+  for (const it of items) {
+    let text = it.name;
 
-        const exact = exactFlavorLookup.get(norm(text)) || collapsedFlavorLookup.get(collapse(text));
-        if (exact) {
-          out.push(`${it.qty} x ${exact}`);
-          if (norm(it.name) !== norm(exact)) notes.push(`"${it.raw ?? it.name}" → "${exact}" (exact)`);
-          continue;
-        }
+    // If it’s a warehouse line, clean it first
+    if (it.source === "warehouse") text = cleanWarehouseItemName(text);
 
-        const best = bestFuzzyMatch(text, candidates.map(f => f.flavor_name));
-        if (!best || best.score < 0.62) {
-          notes.push(`No confident match for: "${it.raw ?? it.name}" (best ${(best?.score ?? 0).toFixed(2)})`);
-          out.push(`${it.qty} x ${it.name}  [UNMATCHED]`);
-          continue;
-        }
+    // Apply alias map (your existing shorthand map)
+    text = applyAlias(text);
 
-        out.push(`${it.qty} x ${best.value}`);
-        if (norm(it.name) !== norm(best.value)) {
-          notes.push(`"${it.raw ?? it.name}" → "${best.value}" (fuzzy ${best.score.toFixed(2)})`);
-        }
-      }
-
-      document.getElementById("orderOutput").value = out.join("\n");
-      document.getElementById("orderNotes").innerHTML = notes.length
-        ? `<div><strong>Match notes</strong></div><div class="muted">${notes.map(escapeHtml).join("<br/>")}</div>`
-        : `<span class="muted">All items matched cleanly.</span>`;
+    // 1) Exact match against flavor_name (normal + collapsed)
+    const exact = exactFlavorLookup.get(norm(text)) || collapsedFlavorLookup.get(collapse(text));
+    if (exact) {
+      out.push(`${it.qty} x ${exact}`);
+      if (norm(it.name) !== norm(exact)) notes.push(`"${it.raw ?? it.name}" → "${exact}" (exact flavor)`);
+      continue;
     }
+
+    // 2) Fuzzy match against flavor_name
+    const bestFlavor = bestFuzzyMatch(text, candidates.map(f => f.flavor_name));
+
+    if (bestFlavor && bestFlavor.score >= 0.62) {
+      out.push(`${it.qty} x ${bestFlavor.value}`);
+      if (norm(it.name) !== norm(bestFlavor.value)) {
+        notes.push(`"${it.raw ?? it.name}" → "${bestFlavor.value}" (fuzzy flavor ${bestFlavor.score.toFixed(2)})`);
+      }
+      continue;
+    }
+
+    // 3) ONLY IF flavor_name fuzzy fails: fuzzy match against warehouse_code (warehouse name)
+    // This catches stuff like "PB Choc Chip" matching warehouse_code for Peanut Butter Chocolate Chip
+    const bestWarehouse = bestFuzzyMatchObj(text, candidates, f => f.warehouse_code);
+
+    if (bestWarehouse && bestWarehouse.score >= 0.62) {
+      out.push(`${it.qty} x ${bestWarehouse.obj.flavor_name}`);
+      notes.push(
+        `"${it.raw ?? it.name}" → "${bestWarehouse.obj.flavor_name}" (via warehouse_code "${bestWarehouse.value}" ${bestWarehouse.score.toFixed(2)})`
+      );
+      continue;
+    }
+
+    // 4) No match
+    notes.push(`No confident match for: "${it.raw ?? it.name}" (flavor ${(bestFlavor?.score ?? 0).toFixed(2)}, warehouse ${(bestWarehouse?.score ?? 0).toFixed(2)})`);
+    out.push(`${it.qty} x ${it.name}  [UNMATCHED]`);
+  }
+
+  document.getElementById("orderOutput").value = out.join("\n");
+  document.getElementById("orderNotes").innerHTML = notes.length
+    ? `<div><strong>Match notes</strong></div><div class="muted">${notes.map(escapeHtml).join("<br/>")}</div>`
+    : `<span class="muted">All items matched cleanly.</span>`;
+}
+
 
     /**********************
      * Label lookup
