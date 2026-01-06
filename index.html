@@ -525,48 +525,147 @@ x 2"></textarea>
     /**********************
      * Order mapper
      **********************/
-    function parseOrder(text) {
-      const lines = text.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+     function parseOrder(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map(x => x.trim())
+    .filter(Boolean);
 
-      const items = [];
-      let pendingName = null;
+  const items = [];
+  let pendingName = null;
 
-      for (const line of lines) {
-        const wh = parseWarehouseLine(line);
-        if (wh) {
-          items.push({ name: wh.name, qty: wh.qty, raw: wh.raw, source: "warehouse" });
-          pendingName = null;
-          continue;
-        }
-
-        const m1 = line.match(/^x\s*(\d+)\s*$/i);
-        if (m1 && pendingName) {
-          items.push({ name: pendingName, qty: Number(m1[1]), raw: pendingName, source: "plain" });
-          pendingName = null;
-          continue;
-        }
-
-        const m2 =
-          line.match(/^(\d+)\s*x\s*(.+)$/i) ||
-          line.match(/^(.+?)\s*x\s*(\d+)$/i) ||
-          line.match(/^(.+?)\s*[-–—:]\s*(\d+)$/);
-
-        if (m2) {
-          let qty = null, name = null;
-          if (m2[1] && /^\d+$/.test(m2[1])) { qty = Number(m2[1]); name = m2[2]; }
-          else { name = m2[1]; qty = Number(m2[2]); }
-          if (name && qty) items.push({ name: name.trim(), qty, raw: line, source: "plain" });
-          pendingName = null;
-          continue;
-        }
-
-        if (pendingName) items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
-        pendingName = line;
-      }
-
-      if (pendingName) items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
-      return items;
+  for (const line of lines) {
+    // 0) Warehouse style line: "3 × (1-1-1) Pumpkin"
+    const wh = parseWarehouseLine(line);
+    if (wh) {
+      items.push({ name: wh.name, qty: wh.qty, raw: wh.raw, source: "warehouse" });
+      pendingName = null;
+      continue;
     }
+
+    // Normalize whitespace + common punctuation
+    let l = line
+      .replace(/\t+/g, " ")
+      .replace(/\u00D7/g, "x")              // × → x
+      .replace(/\u2022|\u2023|\u25E6|\u2043/g, " ") // bullets
+      .replace(/\u2013|\u2014/g, "-")       // – — → -
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // 1) Quantity-only line: "x 2", "qty: 2"
+    const qtyOnly =
+      l.match(/^x\s*(\d+)\s*$/i) ||
+      l.match(/^qty\s*[:=\-]?\s*(\d+)\s*$/i) ||
+      l.match(/^quantity\s*[:=\-]?\s*(\d+)\s*$/i);
+
+    if (qtyOnly && pendingName) {
+      items.push({ name: pendingName, qty: Number(qtyOnly[1]), raw: pendingName, source: "plain" });
+      pendingName = null;
+      continue;
+    }
+
+    // 2) Quantity-first formats:
+    // "2 Maple Pancake"
+    // "2 x Maple Pancake"
+    // "2 - Maple Pancake"
+    // "2: Maple Pancake"
+    // "2) Maple Pancake"
+    // "(2) Maple Pancake"
+    let m =
+      l.match(/^(\d+)\s*(?:x\s*)?(.+?)\s*$/i) ||      // 2 Maple / 2 x Maple
+      l.match(/^(\d+)\s*[:=\-]\s*(.+)$/i) ||          // 2 - Maple
+      l.match(/^(\d+)\)\s*(.+)$/i) ||                 // 2) Maple
+      l.match(/^\(\s*(\d+)\s*\)\s*(.+)$/i);           // (2) Maple
+
+    if (m && m[2] && !/^\d+$/.test(m[2].trim())) {
+      const qty = Number(m[1]);
+      const name = (m[2] ?? "").trim();
+      if (qty && name) {
+        items.push({ name, qty, raw: line, source: "plain" });
+        pendingName = null;
+        continue;
+      }
+    }
+
+    // 3) Inline x formats (qty-first OR qty-last)
+    // "Maple x2", "Maple x 2", "2x Maple", "2 x Maple"
+    m =
+      l.match(/^(\d+)\s*x\s*(.+)$/i) ||
+      l.match(/^(.+?)\s*x\s*(\d+)$/i) ||
+      l.match(/^(.+?)\s*x(\d+)$/i) ||
+      l.match(/^(\d+)\s*x(.+)$/i);
+
+    if (m) {
+      let qty = null, name = null;
+      if (m[1] && /^\d+$/.test(m[1])) { qty = Number(m[1]); name = m[2]; }
+      else { name = m[1]; qty = Number(m[2]); }
+      if (name && qty) {
+        items.push({ name: name.trim(), qty, raw: line, source: "plain" });
+        pendingName = null;
+        continue;
+      }
+    }
+
+    // 4) Quantity-last with punctuation:
+    // "Maple Pancake - 2", "Maple Pancake: 2", "Maple Pancake, 2"
+    m = l.match(/^(.+?)\s*[:=\-,]\s*(\d+)\s*$/);
+    if (m) {
+      const name = (m[1] ?? "").trim();
+      const qty = Number(m[2]);
+      if (name && qty) {
+        items.push({ name, qty, raw: line, source: "plain" });
+        pendingName = null;
+        continue;
+      }
+    }
+
+    // 5) Quantity-last plain:
+    // "Maple Pancake 2"
+    m = l.match(/^(.+?)\s+(\d+)\s*$/);
+    if (m) {
+      const name = (m[1] ?? "").trim();
+      const qty = Number(m[2]);
+      if (name && qty) {
+        items.push({ name, qty, raw: line, source: "plain" });
+        pendingName = null;
+        continue;
+      }
+    }
+
+    // 6) Quantity in parentheses (last):
+    // "Maple Pancake (2)"
+    m = l.match(/^(.+?)\s*\(\s*(\d+)\s*\)\s*$/);
+    if (m) {
+      const name = (m[1] ?? "").trim();
+      const qty = Number(m[2]);
+      if (name && qty) {
+        items.push({ name, qty, raw: line, source: "plain" });
+        pendingName = null;
+        continue;
+      }
+    }
+
+    // 7) Bare number line used as qty for previous flavor
+    if (/^\d+$/.test(l) && pendingName) {
+      items.push({ name: pendingName, qty: Number(l), raw: pendingName, source: "plain" });
+      pendingName = null;
+      continue;
+    }
+
+    // 8) Otherwise treat as flavor line (qty may follow)
+    if (pendingName) {
+      items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
+    }
+    pendingName = l;
+  }
+
+  if (pendingName) {
+    items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
+  }
+
+  return items;
+}
+
 
     function mapOrder() {
   const includeInactive = false;
