@@ -188,38 +188,23 @@ x 2"></textarea>
     // --- Simple stemming for better plural matching (ingredients) ---
     function singularize(word) {
       let w = (word || "").toLowerCase();
-
-      // strawberries -> strawberry, raspberries -> raspberry
       if (w.endsWith("ies") && w.length > 3) return w.slice(0, -3) + "y";
-
-      // powders -> powder, boxes -> box (conservative)
       if (w.endsWith("es") && w.length > 3) return w.slice(0, -2);
-
-      // oats -> oat, chips -> chip
       if (w.endsWith("s") && w.length > 3 && !w.endsWith("ss")) return w.slice(0, -1);
-
       return w;
     }
 
     function pluralize(word) {
       let w = (word || "").toLowerCase();
       if (!w) return w;
-
-      // raspberry -> raspberries, strawberry -> strawberries
       if (w.endsWith("y") && w.length > 2) return w.slice(0, -1) + "ies";
-
       return w + "s";
     }
 
     function stemToken(word) {
       let w = singularize(word);
-
-      // powdered -> powder (rough)
       if (w.endsWith("ed") && w.length > 4) w = w.slice(0, -2);
-
-      // mixing -> mix (rough)
       if (w.endsWith("ing") && w.length > 5) w = w.slice(0, -3);
-
       return w;
     }
 
@@ -233,7 +218,6 @@ x 2"></textarea>
       return [...tokenSetStemmed(s)].join(" ");
     }
 
-    // NEW: build query token variants (singular + plural + original)
     function queryTokenVariants(token) {
       const t = norm(token);
       if (!t) return [];
@@ -278,7 +262,7 @@ x 2"></textarea>
       const iNorm = norm(ingredientCell);
       if (!qNorm || !iNorm) return 0;
 
-      // NEW: token-variant substring check first
+      // token-variant substring check first
       const qVars = queryVariantsString(query);
       for (const v of qVars) {
         if (v && iNorm.includes(v)) return 0.96;
@@ -292,7 +276,6 @@ x 2"></textarea>
       // Token overlap (stemmed)
       const qt = tokenSetStemmed(qNorm);
       const it = tokenSetStemmed(iNorm);
-
       const inter = [...qt].filter(x => it.has(x)).length;
       const union = new Set([...qt, ...it]).size || 1;
       const jacc = inter / union;
@@ -311,17 +294,17 @@ x 2"></textarea>
       }
       return best;
     }
-    function bestFuzzyMatchObj(query, objects, getField) {
-  let best = null;
-  for (const obj of objects) {
-    const val = (getField(obj) ?? "").toString();
-    if (!val.trim()) continue;
-    const sc = fuzzyScore(query, val);
-    if (!best || sc > best.score) best = { obj, value: val, score: sc };
-  }
-  return best;
-}
 
+    function bestFuzzyMatchObj(query, objects, getField) {
+      let best = null;
+      for (const obj of objects) {
+        const val = (getField(obj) ?? "").toString();
+        if (!val.trim()) continue;
+        const sc = fuzzyScore(query, val);
+        if (!best || sc > best.score) best = { obj, value: val, score: sc };
+      }
+      return best;
+    }
 
     /**********************
      * Warehouse-line parsing
@@ -367,8 +350,10 @@ x 2"></textarea>
 
     /**********************
      * Alias mapping
+     * - CUSTOMER orders only (typed by humans)
+     * - warehouse lines should be mapped via warehouse_code lookups first
      **********************/
-    const ALIASES = new Map([
+    const CUSTOMER_ALIASES = new Map([
       ["oreo", "cookies and cream"],
       ["choc chip", "chocolate chip cookie dough"],
       ["glzd bluberry", "glazed blueberry donut"],
@@ -393,13 +378,31 @@ x 2"></textarea>
       ["blueberry", "blueberry cobbler"],
       ["matcha", "matcha mango"],
       ["snicker", "snickerdoodle"],
-      ["caramel apple", "caramel apple"],
-      ["apple", "caramel apple"]
+      ["caramel apple", "caramel apple"]
+      // IMPORTANT: removed ["apple","caramel apple"] because it breaks warehouse Apple mapping
     ]);
 
-    function applyAlias(s) {
+    function applyCustomerAlias(s) {
       const k = norm(s);
-      return ALIASES.get(k) ?? s;
+      return CUSTOMER_ALIASES.get(k) ?? s;
+    }
+
+    // Back-compat: older code calls applyAlias()
+    function applyAlias(s) {
+      return applyCustomerAlias(s);
+    }
+
+    function isCookiesCoffeeIntent(rawLine) {
+      const s = (rawLine ?? "").toString().toLowerCase();
+      // Only treat as coffee if the line explicitly signals it
+      return /\b(pc|protein\s*coffee|protien\s*coffee)\b/.test(s);
+    }
+
+    // Resolve a "target name" into the canonical flavor_name from the sheet using exact lookup maps, if possible.
+    function resolveCanonicalFlavorName(targetName) {
+      const n = norm(targetName);
+      const c = collapse(targetName);
+      return exactFlavorLookup.get(n) || collapsedFlavorLookup.get(c) || targetName;
     }
 
     /**********************
@@ -411,8 +414,17 @@ x 2"></textarea>
     let ingredientCols = [];
     let tableSort = { key: "flavor_name", dir: "asc" };
 
-    let exactFlavorLookup = new Map();
-    let collapsedFlavorLookup = new Map();
+    // flavor_name lookups (exact)
+    let exactFlavorLookup = new Map();      // norm(flavor_name) -> canonical
+    let collapsedFlavorLookup = new Map();  // collapse(flavor_name) -> canonical
+
+    // warehouse name -> flavor lookups (exact)
+    let exactWarehouseLookup = new Map();      // norm(warehouse_code) -> flavor_name
+    let collapsedWarehouseLookup = new Map();  // collapse(warehouse_code) -> flavor_name
+
+    // OPTIONAL: flavor_id -> flavor_name (for codes inside parentheses)
+    let exactFlavorIdLookup = new Map();       // norm(flavor_id) -> flavor_name
+    let collapsedFlavorIdLookup = new Map();   // collapse(flavor_id) -> flavor_name
 
     // Keep last metadata from API
     let lastUpdatedAt = null;
@@ -453,7 +465,9 @@ x 2"></textarea>
       const PRODUCT_KEY  = pickKey(["Product", "product"]);
       const STATUS_KEY   = pickKey(["Status", "status"]);
       const WH_CODE_KEY  = pickKey(["warehouse_code", "Warehouse Code", "warehouse code", "warehouse", "code"]);
-      const FLAVORID_KEY = pickKey(["flavor_id_clean", "flavor_id", "Flavor ID Clean", "Flavor ID"]);
+
+      const TRUE_FLAVOR_ID_KEY = pickKey(["flavor_id", "Flavor ID"]);
+      const CLEAN_FLAVOR_ID_KEY = pickKey(["flavor_id_clean", "Flavor ID Clean"]);
 
       // Supports ingredient_one/ingredient_two... as well as ingredient_* style
       ingredientCols = Object.keys(trimmed[0] || {}).filter(k => {
@@ -478,7 +492,11 @@ x 2"></textarea>
 
       flavors = trimmed.map(r => {
         const flavorName = ((FLAVOR_KEY ? r[FLAVOR_KEY] : "") ?? "").toString().trim();
-        const id = ((FLAVORID_KEY ? r[FLAVORID_KEY] : "") ?? r.flavor_id_clean ?? r.flavor_id ?? flavorName).toString().trim();
+
+        const trueFlavorId = ((TRUE_FLAVOR_ID_KEY ? r[TRUE_FLAVOR_ID_KEY] : "") ?? r.flavor_id ?? "").toString().trim();
+        const cleanFlavorId = ((CLEAN_FLAVOR_ID_KEY ? r[CLEAN_FLAVOR_ID_KEY] : "") ?? r.flavor_id_clean ?? "").toString().trim();
+        const id = (cleanFlavorId || trueFlavorId || flavorName).toString().trim();
+
         const status = (((STATUS_KEY ? r[STATUS_KEY] : "") ?? r.Status ?? r.status) ?? "Active").toString().trim();
 
         const ingredients = ingredientCols
@@ -490,6 +508,8 @@ x 2"></textarea>
 
         return {
           id,
+          flavor_id: trueFlavorId,
+          flavor_id_clean: cleanFlavorId,
           flavor_name: flavorName,
           flavor_name_norm: norm(flavorName),
           status,
@@ -501,14 +521,32 @@ x 2"></textarea>
         };
       });
 
-      // Build exact lookups for order mapper
+      // Build exact lookups for order mapper (flavor_name + warehouse_code + flavor_id)
       exactFlavorLookup = new Map();
       collapsedFlavorLookup = new Map();
+      exactWarehouseLookup = new Map();
+      collapsedWarehouseLookup = new Map();
+      exactFlavorIdLookup = new Map();
+      collapsedFlavorIdLookup = new Map();
+
       for (const f of flavors) {
-        const k1 = norm(f.flavor_name);
-        const k2 = collapse(f.flavor_name);
-        if (k1) exactFlavorLookup.set(k1, f.flavor_name);
-        if (k2) collapsedFlavorLookup.set(k2, f.flavor_name);
+        // flavor_name lookups
+        const fn1 = norm(f.flavor_name);
+        const fn2 = collapse(f.flavor_name);
+        if (fn1) exactFlavorLookup.set(fn1, f.flavor_name);
+        if (fn2) collapsedFlavorLookup.set(fn2, f.flavor_name);
+
+        // warehouse_code lookups (warehouse name)
+        const wh1 = norm(f.warehouse_code);
+        const wh2 = collapse(f.warehouse_code);
+        if (wh1) exactWarehouseLookup.set(wh1, f.flavor_name);
+        if (wh2) collapsedWarehouseLookup.set(wh2, f.flavor_name);
+
+        // flavor_id lookups (code inside parentheses)
+        const fid1 = norm(f.flavor_id);
+        const fid2 = collapse(f.flavor_id);
+        if (fid1) exactFlavorIdLookup.set(fid1, f.flavor_name);
+        if (fid2) collapsedFlavorIdLookup.set(fid2, f.flavor_name);
       }
 
       renderTable();
@@ -525,209 +563,230 @@ x 2"></textarea>
     /**********************
      * Order mapper
      **********************/
-     function parseOrder(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map(x => x.trim())
-    .filter(Boolean);
+    function parseOrder(text) {
+      const lines = text
+        .split(/\r?\n/)
+        .map(x => x.trim())
+        .filter(Boolean);
 
-  const items = [];
-  let pendingName = null;
+      const items = [];
+      let pendingName = null;
 
-  for (const line of lines) {
-    // 0) Warehouse style line: "3 × (1-1-1) Pumpkin"
-    const wh = parseWarehouseLine(line);
-    if (wh) {
-      items.push({ name: wh.name, qty: wh.qty, raw: wh.raw, source: "warehouse" });
-      pendingName = null;
-      continue;
-    }
+      for (const line of lines) {
+        // 0) Warehouse style line: "3 × (1-1-1) Pumpkin"
+        const wh = parseWarehouseLine(line);
+        if (wh) {
+          items.push({ name: wh.name, qty: wh.qty, raw: wh.raw, source: "warehouse" });
+          pendingName = null;
+          continue;
+        }
 
-    // Normalize whitespace + common punctuation
-    let l = line
-      .replace(/\t+/g, " ")
-      .replace(/\u00D7/g, "x")              // × → x
-      .replace(/\u2022|\u2023|\u25E6|\u2043/g, " ") // bullets
-      .replace(/\u2013|\u2014/g, "-")       // – — → -
-      .replace(/\s+/g, " ")
-      .trim();
+        // Normalize whitespace + common punctuation
+        let l = line
+          .replace(/\t+/g, " ")
+          .replace(/\u00D7/g, "x")                      // × → x
+          .replace(/\u2022|\u2023|\u25E6|\u2043/g, " ") // bullets
+          .replace(/\u2013|\u2014/g, "-")               // – — → -
+          .replace(/\s+/g, " ")
+          .trim();
 
-    // 1) Quantity-only line: "x 2", "qty: 2"
-    const qtyOnly =
-      l.match(/^x\s*(\d+)\s*$/i) ||
-      l.match(/^qty\s*[:=\-]?\s*(\d+)\s*$/i) ||
-      l.match(/^quantity\s*[:=\-]?\s*(\d+)\s*$/i);
+        // 1) Quantity-only line: "x 2", "qty: 2"
+        const qtyOnly =
+          l.match(/^x\s*(\d+)\s*$/i) ||
+          l.match(/^qty\s*[:=\-]?\s*(\d+)\s*$/i) ||
+          l.match(/^quantity\s*[:=\-]?\s*(\d+)\s*$/i);
 
-    if (qtyOnly && pendingName) {
-      items.push({ name: pendingName, qty: Number(qtyOnly[1]), raw: pendingName, source: "plain" });
-      pendingName = null;
-      continue;
-    }
+        if (qtyOnly && pendingName) {
+          items.push({ name: pendingName, qty: Number(qtyOnly[1]), raw: pendingName, source: "plain" });
+          pendingName = null;
+          continue;
+        }
 
-    // 2) Quantity-first formats:
-    // "2 Maple Pancake"
-    // "2 x Maple Pancake"
-    // "2 - Maple Pancake"
-    // "2: Maple Pancake"
-    // "2) Maple Pancake"
-    // "(2) Maple Pancake"
-    let m =
-      l.match(/^(\d+)\s*(?:x\s*)?(.+?)\s*$/i) ||      // 2 Maple / 2 x Maple
-      l.match(/^(\d+)\s*[:=\-]\s*(.+)$/i) ||          // 2 - Maple
-      l.match(/^(\d+)\)\s*(.+)$/i) ||                 // 2) Maple
-      l.match(/^\(\s*(\d+)\s*\)\s*(.+)$/i);           // (2) Maple
+        // 2) Quantity-first formats:
+        // "2 Maple Pancake" / "2 x Maple Pancake" / "2 - Maple" / "2) Maple" / "(2) Maple"
+        let m =
+          l.match(/^(\d+)\s*(?:x\s*)?(.+?)\s*$/i) ||
+          l.match(/^(\d+)\s*[:=\-]\s*(.+)$/i) ||
+          l.match(/^(\d+)\)\s*(.+)$/i) ||
+          l.match(/^\(\s*(\d+)\s*\)\s*(.+)$/i);
 
-    if (m && m[2] && !/^\d+$/.test(m[2].trim())) {
-      const qty = Number(m[1]);
-      const name = (m[2] ?? "").trim();
-      if (qty && name) {
-        items.push({ name, qty, raw: line, source: "plain" });
-        pendingName = null;
-        continue;
+        if (m && m[2] && !/^\d+$/.test(m[2].trim())) {
+          const qty = Number(m[1]);
+          const name = (m[2] ?? "").trim();
+          if (qty && name) {
+            items.push({ name, qty, raw: line, source: "plain" });
+            pendingName = null;
+            continue;
+          }
+        }
+
+        // 3) Inline x formats (qty-first OR qty-last)
+        // "Maple x2", "2x Maple"
+        m =
+          l.match(/^(\d+)\s*x\s*(.+)$/i) ||
+          l.match(/^(.+?)\s*x\s*(\d+)$/i) ||
+          l.match(/^(.+?)\s*x(\d+)$/i) ||
+          l.match(/^(\d+)\s*x(.+)$/i);
+
+        if (m) {
+          let qty = null, name = null;
+          if (m[1] && /^\d+$/.test(m[1])) { qty = Number(m[1]); name = m[2]; }
+          else { name = m[1]; qty = Number(m[2]); }
+          if (name && qty) {
+            items.push({ name: name.trim(), qty, raw: line, source: "plain" });
+            pendingName = null;
+            continue;
+          }
+        }
+
+        // 4) Quantity-last with punctuation:
+        // "Maple Pancake - 2", "Maple Pancake: 2", "Maple Pancake, 2"
+        m = l.match(/^(.+?)\s*[:=\-,]\s*(\d+)\s*$/);
+        if (m) {
+          const name = (m[1] ?? "").trim();
+          const qty = Number(m[2]);
+          if (name && qty) {
+            items.push({ name, qty, raw: line, source: "plain" });
+            pendingName = null;
+            continue;
+          }
+        }
+
+        // 5) Quantity-last plain: "Maple Pancake 2"
+        m = l.match(/^(.+?)\s+(\d+)\s*$/);
+        if (m) {
+          const name = (m[1] ?? "").trim();
+          const qty = Number(m[2]);
+          if (name && qty) {
+            items.push({ name, qty, raw: line, source: "plain" });
+            pendingName = null;
+            continue;
+          }
+        }
+
+        // 6) Quantity in parentheses (last): "Maple Pancake (2)"
+        m = l.match(/^(.+?)\s*\(\s*(\d+)\s*\)\s*$/);
+        if (m) {
+          const name = (m[1] ?? "").trim();
+          const qty = Number(m[2]);
+          if (name && qty) {
+            items.push({ name, qty, raw: line, source: "plain" });
+            pendingName = null;
+            continue;
+          }
+        }
+
+        // 7) Bare number line used as qty for previous flavor
+        if (/^\d+$/.test(l) && pendingName) {
+          items.push({ name: pendingName, qty: Number(l), raw: pendingName, source: "plain" });
+          pendingName = null;
+          continue;
+        }
+
+        // 8) Otherwise treat as flavor line (qty may follow)
+        if (pendingName) items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
+        pendingName = l;
       }
+
+      if (pendingName) items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
+
+      return items;
     }
 
-    // 3) Inline x formats (qty-first OR qty-last)
-    // "Maple x2", "Maple x 2", "2x Maple", "2 x Maple"
-    m =
-      l.match(/^(\d+)\s*x\s*(.+)$/i) ||
-      l.match(/^(.+?)\s*x\s*(\d+)$/i) ||
-      l.match(/^(.+?)\s*x(\d+)$/i) ||
-      l.match(/^(\d+)\s*x(.+)$/i);
-
-    if (m) {
-      let qty = null, name = null;
-      if (m[1] && /^\d+$/.test(m[1])) { qty = Number(m[1]); name = m[2]; }
-      else { name = m[1]; qty = Number(m[2]); }
-      if (name && qty) {
-        items.push({ name: name.trim(), qty, raw: line, source: "plain" });
-        pendingName = null;
-        continue;
-      }
-    }
-
-    // 4) Quantity-last with punctuation:
-    // "Maple Pancake - 2", "Maple Pancake: 2", "Maple Pancake, 2"
-    m = l.match(/^(.+?)\s*[:=\-,]\s*(\d+)\s*$/);
-    if (m) {
-      const name = (m[1] ?? "").trim();
-      const qty = Number(m[2]);
-      if (name && qty) {
-        items.push({ name, qty, raw: line, source: "plain" });
-        pendingName = null;
-        continue;
-      }
-    }
-
-    // 5) Quantity-last plain:
-    // "Maple Pancake 2"
-    m = l.match(/^(.+?)\s+(\d+)\s*$/);
-    if (m) {
-      const name = (m[1] ?? "").trim();
-      const qty = Number(m[2]);
-      if (name && qty) {
-        items.push({ name, qty, raw: line, source: "plain" });
-        pendingName = null;
-        continue;
-      }
-    }
-
-    // 6) Quantity in parentheses (last):
-    // "Maple Pancake (2)"
-    m = l.match(/^(.+?)\s*\(\s*(\d+)\s*\)\s*$/);
-    if (m) {
-      const name = (m[1] ?? "").trim();
-      const qty = Number(m[2]);
-      if (name && qty) {
-        items.push({ name, qty, raw: line, source: "plain" });
-        pendingName = null;
-        continue;
-      }
-    }
-
-    // 7) Bare number line used as qty for previous flavor
-    if (/^\d+$/.test(l) && pendingName) {
-      items.push({ name: pendingName, qty: Number(l), raw: pendingName, source: "plain" });
-      pendingName = null;
-      continue;
-    }
-
-    // 8) Otherwise treat as flavor line (qty may follow)
-    if (pendingName) {
-      items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
-    }
-    pendingName = l;
-  }
-
-  if (pendingName) {
-    items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
-  }
-
-  return items;
-}
-
-
+    // Robust mapping: exact lookups first, fuzzy LAST.
     function mapOrder() {
-  const includeInactive = false;
-  const input = document.getElementById("orderInput").value;
-  const items = parseOrder(input);
+      const includeInactive = false;
+      const input = document.getElementById("orderInput").value;
+      const items = parseOrder(input);
 
-  const candidates = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
+      const candidates = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
 
-  const out = [];
-  const notes = [];
+      const out = [];
+      const notes = [];
 
-  for (const it of items) {
-    let text = it.name;
+      for (const it of items) {
+        const rawLine = it.raw ?? it.name ?? "";
 
-    // If it’s a warehouse line, clean it first
-    if (it.source === "warehouse") text = cleanWarehouseItemName(text);
+        // Start with the provided name
+        let text = it.name;
 
-    // Apply alias map (your existing shorthand map)
-    text = applyAlias(text);
+        // If it’s a warehouse line, clean the warehouse item name first
+        if (it.source === "warehouse") text = cleanWarehouseItemName(text);
 
-    // 1) Exact match against flavor_name (normal + collapsed)
-    const exact = exactFlavorLookup.get(norm(text)) || collapsedFlavorLookup.get(collapse(text));
-    if (exact) {
-      out.push(`${it.qty} x ${exact}`);
-      if (norm(it.name) !== norm(exact)) notes.push(`"${it.raw ?? it.name}" → "${exact}" (exact flavor)`);
-      continue;
-    }
+        // ---- Cookies & Cream rule (BEFORE aliases/fuzzy) ----
+        // “Cookies and Cream” and “Cookies & Cream” should map to oatmeal,
+        // unless line explicitly contains PC / Protein Coffee.
+        const nText = norm(text);
+        const isCookiesCream = nText.includes("cookies") && nText.includes("cream");
 
-    // 2) Fuzzy match against flavor_name
-    const bestFlavor = bestFuzzyMatch(text, candidates.map(f => f.flavor_name));
+        if (isCookiesCream) {
+          if (isCookiesCoffeeIntent(rawLine)) {
+            const canonical = resolveCanonicalFlavorName("cookies and cream protein coffee");
+            out.push(`${it.qty} x ${canonical}`);
+            notes.push(`"${rawLine}" → "${canonical}" (explicit PC/Protein Coffee)`);
+            continue;
+          } else {
+            const canonical = resolveCanonicalFlavorName("cookies and cream");
+            out.push(`${it.qty} x ${canonical}`);
+            notes.push(`"${rawLine}" → "${canonical}" (default oatmeal)`);
+            continue;
+          }
+        }
 
-    if (bestFlavor && bestFlavor.score >= 0.62) {
-      out.push(`${it.qty} x ${bestFlavor.value}`);
-      if (norm(it.name) !== norm(bestFlavor.value)) {
-        notes.push(`"${it.raw ?? it.name}" → "${bestFlavor.value}" (fuzzy flavor ${bestFlavor.score.toFixed(2)})`);
+        // Apply your customer alias map (only affects plain/human inputs)
+        text = applyAlias(text);
+
+        // 1) Exact match against flavor_name (normal + collapsed)
+        const exact = exactFlavorLookup.get(norm(text)) || collapsedFlavorLookup.get(collapse(text));
+        if (exact) {
+          out.push(`${it.qty} x ${exact}`);
+          if (norm(it.name) !== norm(exact)) notes.push(`"${rawLine}" → "${exact}" (exact flavor)`);
+          continue;
+        }
+
+        // 2) Exact match against warehouse_code (warehouse name) ONLY if flavor exact failed
+        const whExact =
+          exactWarehouseLookup.get(norm(text)) ||
+          collapsedWarehouseLookup.get(collapse(text));
+
+        if (whExact) {
+          out.push(`${it.qty} x ${whExact}`);
+          notes.push(`"${rawLine}" → "${whExact}" (exact warehouse_code match)`);
+          continue;
+        }
+
+        // 3) Fuzzy match against flavor_name
+        const bestFlavor = bestFuzzyMatch(text, candidates.map(f => f.flavor_name));
+        if (bestFlavor && bestFlavor.score >= 0.62) {
+          out.push(`${it.qty} x ${bestFlavor.value}`);
+          if (norm(it.name) !== norm(bestFlavor.value)) {
+            notes.push(`"${rawLine}" → "${bestFlavor.value}" (fuzzy flavor ${bestFlavor.score.toFixed(2)})`);
+          }
+          continue;
+        }
+
+        // 4) Fuzzy match against warehouse_code (LAST resort)
+        const bestWarehouse = bestFuzzyMatchObj(text, candidates, f => f.warehouse_code);
+        if (bestWarehouse && bestWarehouse.score >= 0.62) {
+          out.push(`${it.qty} x ${bestWarehouse.obj.flavor_name}`);
+          notes.push(
+            `"${rawLine}" → "${bestWarehouse.obj.flavor_name}" (fuzzy warehouse_code "${bestWarehouse.value}" ${bestWarehouse.score.toFixed(2)})`
+          );
+          continue;
+        }
+
+        // 5) No match
+        notes.push(
+          `No confident match for: "${rawLine}" (flavor ${(bestFlavor?.score ?? 0).toFixed(2)}, warehouse ${(bestWarehouse?.score ?? 0).toFixed(2)})`
+        );
+        out.push(`${it.qty} x ${it.name}  [UNMATCHED]`);
       }
-      continue;
+
+      document.getElementById("orderOutput").value = out.join("\n");
+      document.getElementById("orderNotes").innerHTML = notes.length
+        ? `<div><strong>Match notes</strong></div><div class="muted">${notes.map(escapeHtml).join("<br/>")}</div>`
+        : `<span class="muted">All items matched cleanly.</span>`;
     }
-
-    // 3) ONLY IF flavor_name fuzzy fails: fuzzy match against warehouse_code (warehouse name)
-    // This catches stuff like "PB Choc Chip" matching warehouse_code for Peanut Butter Chocolate Chip
-    const bestWarehouse = bestFuzzyMatchObj(text, candidates, f => f.warehouse_code);
-
-    if (bestWarehouse && bestWarehouse.score >= 0.62) {
-      out.push(`${it.qty} x ${bestWarehouse.obj.flavor_name}`);
-      notes.push(
-        `"${it.raw ?? it.name}" → "${bestWarehouse.obj.flavor_name}" (via warehouse_code "${bestWarehouse.value}" ${bestWarehouse.score.toFixed(2)})`
-      );
-      continue;
-    }
-
-    // 4) No match
-    notes.push(`No confident match for: "${it.raw ?? it.name}" (flavor ${(bestFlavor?.score ?? 0).toFixed(2)}, warehouse ${(bestWarehouse?.score ?? 0).toFixed(2)})`);
-    out.push(`${it.qty} x ${it.name}  [UNMATCHED]`);
-  }
-
-  document.getElementById("orderOutput").value = out.join("\n");
-  document.getElementById("orderNotes").innerHTML = notes.length
-    ? `<div><strong>Match notes</strong></div><div class="muted">${notes.map(escapeHtml).join("<br/>")}</div>`
-    : `<span class="muted">All items matched cleanly.</span>`;
-}
-
 
     /**********************
      * Label lookup
