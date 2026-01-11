@@ -712,26 +712,52 @@ x 2"></textarea>
 
         // If it’s a warehouse line, clean the warehouse item name first
         if (it.source === "warehouse") text = cleanWarehouseItemName(text);
+// ---- Cookies & Cream rule (BEFORE aliases/fuzzy) ----
+const nText = norm(text);
+const isCookiesCream =
+  nText.includes("cookies") &&
+  nText.includes("cream"); // covers "cookies & cream" and "cookies and cream" after norm()
 
-        // ---- Cookies & Cream rule (BEFORE aliases/fuzzy) ----
-        // “Cookies and Cream” and “Cookies & Cream” should map to oatmeal,
-        // unless line explicitly contains PC / Protein Coffee.
-        const nText = norm(text);
-        const isCookiesCream = nText.includes("cookies") && nText.includes("cream");
+if (isCookiesCream) {
+  const wantsCoffee = isCookiesCoffeeIntent(rawLine);
 
-        if (isCookiesCream) {
-          if (isCookiesCoffeeIntent(rawLine)) {
-            const canonical = resolveCanonicalFlavorName("cookies and cream protein coffee");
-            out.push(`${it.qty} x ${canonical}`);
-            notes.push(`"${rawLine}" → "${canonical}" (explicit PC/Protein Coffee)`);
-            continue;
-          } else {
-            const canonical = resolveCanonicalFlavorName("cookies and cream");
-            out.push(`${it.qty} x ${canonical}`);
-            notes.push(`"${rawLine}" → "${canonical}" (default oatmeal)`);
-            continue;
-          }
-        }
+  // Helper: does a flavor look like cookies+cream?
+  const looksLikeCookiesCream = (f) => {
+    const n = norm(f.flavor_name);
+    return n.includes("cookies") && n.includes("cream");
+  };
+
+  // Prefer matching by product/name so we return EXACT spreadsheet flavor_name (keeps "&")
+  let picked = null;
+
+  if (wantsCoffee) {
+    // Pick coffee/protein coffee variant
+    picked = candidates.find(f => {
+      if (!looksLikeCookiesCream(f)) return false;
+      const pn = norm(f.product);
+      const fn = norm(f.flavor_name);
+      return pn.includes("coffee") || fn.includes("protein coffee") || fn.includes("coffee");
+    });
+  } else {
+    // Default to oats variant (NOT coffee)
+    picked = candidates.find(f => {
+      if (!looksLikeCookiesCream(f)) return false;
+      const pn = norm(f.product);
+      const fn = norm(f.flavor_name);
+      const isCoffee = pn.includes("coffee") || fn.includes("protein coffee") || fn.includes("coffee");
+      return !isCoffee;
+    });
+  }
+
+  if (picked) {
+    out.push(`${it.qty} x ${picked.flavor_name}`);
+    notes.push(`"${rawLine}" → "${picked.flavor_name}" (${wantsCoffee ? "explicit coffee" : "default oats"})`);
+    continue;
+  }
+
+  // If somehow not found, fall through to normal matching pipeline
+}
+
 
         // Apply your customer alias map (only affects plain/human inputs)
         text = applyAlias(text);
