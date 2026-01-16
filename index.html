@@ -85,8 +85,16 @@ x 2"></textarea>
   <div class="row" style="margin-top:12px;">
     <div class="card grow">
       <h2>Ingredient Lookup</h2>
-      <div class="muted">Fuzzy ingredient search. Handles plurals (raspberry/raspberries, strawberry/strawberries).</div>
-      <input id="ingredientQuery" type="text" placeholder="e.g., raspberry, strawberries, cocoa, cinnamon" />
+      <div class="muted">
+        Fuzzy ingredient search. Handles plurals (raspberry/raspberries, strawberry/strawberries).
+        Also supports “missing ingredient” queries below.
+      </div>
+      <div class="split" style="margin-top:8px;">
+        <input id="ingredientQuery" type="text" placeholder="e.g., raspberry, strawberries, cocoa, cinnamon" />
+        <select id="missingIngredientSelect" disabled>
+          <option value="">List flavors missing ingredient…</option>
+        </select>
+      </div>
       <div style="margin-top:10px;" class="split">
         <button id="searchIngredient" disabled>Search</button>
         <label class="muted"><input id="includeInactiveIng" type="checkbox" /> include inactive</label>
@@ -114,6 +122,15 @@ x 2"></textarea>
           <div class="muted" style="margin-top:6px;">Shakers & scoops excluded.</div>
         </div>
 
+        <div>
+          <div class="muted">Vegan filter</div>
+          <select id="veganFilter" disabled>
+            <option value="all">All</option>
+            <option value="vegan">Vegan only</option>
+            <option value="nonvegan">Non-Vegan only</option>
+          </select>
+        </div>
+
         <div class="right">
           <button id="calcExtremes" disabled>Compute Most/Least</button>
           <div style="margin-top:8px;">
@@ -127,17 +144,50 @@ x 2"></textarea>
   </div>
 
   <div class="card" style="margin-top:12px;">
-    <div class="split">
-      <h2 style="margin:0;">All Flavors (sortable)</h2>
-      <div class="right">
+    <div class="split" style="align-items:flex-end;">
+      <div style="flex: 1 1 260px;">
+        <h2 style="margin:0;">All Flavors (sortable)</h2>
+        <div class="muted">Click a header to sort. Table shows only items with nutrition values.</div>
+      </div>
+  
+      <div style="flex: 1 1 220px;">
+        <div class="muted">Search</div>
         <input id="tableSearch" type="text" placeholder="Search table…" />
       </div>
+  
+      <div style="flex: 1 1 180px;">
+        <div class="muted">Product</div>
+        <select id="tableProductFilter">
+          <option value="all">All</option>
+          <option value="oats">Only Oats</option>
+          <option value="coffee">Only Coffee</option>
+        </select>
+      </div>
+  
+      <div style="flex: 1 1 180px;">
+        <div class="muted">Vegan</div>
+        <select id="tableVeganFilter">
+          <option value="all">All</option>
+          <option value="vegan">Vegan only</option>
+          <option value="nonvegan">Non-Vegan only</option>
+        </select>
+      </div>
+  
+      <div style="flex: 1 1 180px;">
+        <div class="muted">Status</div>
+        <select id="tableStatusFilter">
+          <option value="all">All</option>
+          <option value="active">Active only</option>
+          <option value="inactive">Inactive only</option>
+        </select>
+      </div>
     </div>
-    <div class="muted">Click a header to sort. Table shows only items with nutrition values.</div>
+  
     <div style="overflow:auto; margin-top:10px;">
       <table id="flavorTable"></table>
     </div>
   </div>
+  
 
   <script>
     // ==============================
@@ -183,6 +233,13 @@ x 2"></textarea>
         year: "numeric", month: "2-digit", day: "2-digit",
         hour: "2-digit", minute: "2-digit"
       });
+    }
+
+    function toBoolish(x) {
+      const s = (x ?? "").toString().trim().toLowerCase();
+      if (s === "true" || s === "yes" || s === "y" || s === "1") return true;
+      if (s === "false" || s === "no" || s === "n" || s === "0") return false;
+      return null;
     }
 
     // --- Simple stemming for better plural matching (ingredients) ---
@@ -348,10 +405,29 @@ x 2"></textarea>
       return true;
     }
 
+    function veganPassesFilter(f, filterValue) {
+      if (filterValue === "all") return true;
+      if (filterValue === "vegan") return f.is_vegan === true;
+      if (filterValue === "nonvegan") return f.is_vegan === false;
+      return true;
+    }
+
     /**********************
-     * Alias mapping
-     * - CUSTOMER orders only (typed by humans)
-     * - warehouse lines should be mapped via warehouse_code lookups first
+     * Cookies & Cream rule helpers
+     **********************/
+    function isCookiesCoffeeIntent(rawLine) {
+      const s = (rawLine ?? "").toString().toLowerCase();
+      return /\b(pc|protein\s*coffee|protien\s*coffee)\b/.test(s);
+    }
+
+    function resolveCanonicalFlavorName(targetName) {
+      const n = norm(targetName);
+      const c = collapse(targetName);
+      return exactFlavorLookup.get(n) || collapsedFlavorLookup.get(c) || targetName;
+    }
+
+    /**********************
+     * Alias mapping (customer orders only)
      **********************/
     const CUSTOMER_ALIASES = new Map([
       ["oreo", "cookies and cream"],
@@ -379,30 +455,12 @@ x 2"></textarea>
       ["matcha", "matcha mango"],
       ["snicker", "snickerdoodle"],
       ["caramel apple", "caramel apple"]
-      // IMPORTANT: removed ["apple","caramel apple"] because it breaks warehouse Apple mapping
+      // IMPORTANT: removed ["apple","caramel apple"]
     ]);
 
     function applyCustomerAlias(s) {
       const k = norm(s);
       return CUSTOMER_ALIASES.get(k) ?? s;
-    }
-
-    // Back-compat: older code calls applyAlias()
-    function applyAlias(s) {
-      return applyCustomerAlias(s);
-    }
-
-    function isCookiesCoffeeIntent(rawLine) {
-      const s = (rawLine ?? "").toString().toLowerCase();
-      // Only treat as coffee if the line explicitly signals it
-      return /\b(pc|protein\s*coffee|protien\s*coffee)\b/.test(s);
-    }
-
-    // Resolve a "target name" into the canonical flavor_name from the sheet using exact lookup maps, if possible.
-    function resolveCanonicalFlavorName(targetName) {
-      const n = norm(targetName);
-      const c = collapse(targetName);
-      return exactFlavorLookup.get(n) || collapsedFlavorLookup.get(c) || targetName;
     }
 
     /**********************
@@ -422,13 +480,16 @@ x 2"></textarea>
     let exactWarehouseLookup = new Map();      // norm(warehouse_code) -> flavor_name
     let collapsedWarehouseLookup = new Map();  // collapse(warehouse_code) -> flavor_name
 
-    // OPTIONAL: flavor_id -> flavor_name (for codes inside parentheses)
+    // flavor_id -> flavor_name (optional)
     let exactFlavorIdLookup = new Map();       // norm(flavor_id) -> flavor_name
     let collapsedFlavorIdLookup = new Map();   // collapse(flavor_id) -> flavor_name
 
     // Keep last metadata from API
     let lastUpdatedAt = null;
     let lastSheetName = null;
+
+    // NEW: column key for vegan boolean
+    let VEGAN_KEY = null;
 
     function setLoadStatus(msg) {
       document.getElementById("loadStatus").textContent = msg;
@@ -439,6 +500,28 @@ x 2"></textarea>
         document.getElementById(id).disabled = !on;
       }
       document.getElementById("refreshData").disabled = false;
+    }
+
+    function buildMissingIngredientDropdown(pool) {
+      const sel = document.getElementById("missingIngredientSelect");
+      // build from ingredient "tokens" (stemmed) -> display sample
+      const tokenToExamples = new Map(); // token -> Set(examples)
+      for (const f of pool) {
+        for (const ing of f.ingredients) {
+          for (const t of tokenSetStemmed(ing)) {
+            if (!t) continue;
+            if (!tokenToExamples.has(t)) tokenToExamples.set(t, new Set());
+            const exSet = tokenToExamples.get(t);
+            if (exSet.size < 3) exSet.add(ing);
+          }
+        }
+      }
+
+      const tokens = [...tokenToExamples.keys()].sort((a,b) => a.localeCompare(b));
+      const opts = ['<option value="">List flavors missing ingredient…</option>']
+        .concat(tokens.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`));
+      sel.innerHTML = opts.join("");
+      sel.disabled = false;
     }
 
     function buildModel(parsedRows) {
@@ -469,6 +552,9 @@ x 2"></textarea>
       const TRUE_FLAVOR_ID_KEY = pickKey(["flavor_id", "Flavor ID"]);
       const CLEAN_FLAVOR_ID_KEY = pickKey(["flavor_id_clean", "Flavor ID Clean"]);
 
+      // NEW: vegan column (your sheet shows is_vegan)
+      VEGAN_KEY = pickKey(["is_vegan", "Is Vegan", "is vegan", "Vegan", "vegan"]);
+
       // Supports ingredient_one/ingredient_two... as well as ingredient_* style
       ingredientCols = Object.keys(trimmed[0] || {}).filter(k => {
         const kk = k.toLowerCase();
@@ -490,6 +576,9 @@ x 2"></textarea>
       const productFilter = document.getElementById("productFilter");
       productFilter.disabled = false;
 
+      const veganFilter = document.getElementById("veganFilter");
+      veganFilter.disabled = false;
+
       flavors = trimmed.map(r => {
         const flavorName = ((FLAVOR_KEY ? r[FLAVOR_KEY] : "") ?? "").toString().trim();
 
@@ -506,6 +595,8 @@ x 2"></textarea>
         const nutrition = {};
         for (const c of nutritionCols) nutrition[c] = toNumber(r[c]);
 
+        const isVegan = VEGAN_KEY ? toBoolish(r[VEGAN_KEY]) : null;
+
         return {
           id,
           flavor_id: trueFlavorId,
@@ -515,6 +606,7 @@ x 2"></textarea>
           status,
           product: ((PRODUCT_KEY ? r[PRODUCT_KEY] : "") ?? "").toString().trim(),
           warehouse_code: ((WH_CODE_KEY ? r[WH_CODE_KEY] : "") ?? "").toString().trim(),
+          is_vegan: isVegan,
           nutrition,
           ingredients,
           ingredients_norm: ingredients.map(norm)
@@ -530,24 +622,27 @@ x 2"></textarea>
       collapsedFlavorIdLookup = new Map();
 
       for (const f of flavors) {
-        // flavor_name lookups
         const fn1 = norm(f.flavor_name);
         const fn2 = collapse(f.flavor_name);
         if (fn1) exactFlavorLookup.set(fn1, f.flavor_name);
         if (fn2) collapsedFlavorLookup.set(fn2, f.flavor_name);
 
-        // warehouse_code lookups (warehouse name)
         const wh1 = norm(f.warehouse_code);
         const wh2 = collapse(f.warehouse_code);
         if (wh1) exactWarehouseLookup.set(wh1, f.flavor_name);
         if (wh2) collapsedWarehouseLookup.set(wh2, f.flavor_name);
 
-        // flavor_id lookups (code inside parentheses)
         const fid1 = norm(f.flavor_id);
         const fid2 = collapse(f.flavor_id);
         if (fid1) exactFlavorIdLookup.set(fid1, f.flavor_name);
         if (fid2) collapsedFlavorIdLookup.set(fid2, f.flavor_name);
       }
+
+      // Build "missing ingredient" dropdown from ACTIVE, non-excluded flavors
+      const poolForIng = flavors
+        .filter(f => f.status.toLowerCase() === "active")
+        .filter(f => !isExcludedNonFlavor(f));
+      buildMissingIngredientDropdown(poolForIng);
 
       renderTable();
       setEnabled(true);
@@ -555,13 +650,14 @@ x 2"></textarea>
       const meta =
         `Loaded ${flavors.length} rows` +
         (lastSheetName ? ` • sheet: ${lastSheetName}` : "") +
-        (lastUpdatedAt ? ` • updated: ${fmtUpdatedAt(lastUpdatedAt)}` : "");
+        (lastUpdatedAt ? ` • updated: ${fmtUpdatedAt(lastUpdatedAt)}` : "") +
+        (VEGAN_KEY ? ` • vegan col: ${VEGAN_KEY}` : ` • vegan col: (missing)`);
 
       setLoadStatus(meta);
     }
 
     /**********************
-     * Order mapper
+     * Order parsing
      **********************/
     function parseOrder(text) {
       const lines = text
@@ -573,24 +669,21 @@ x 2"></textarea>
       let pendingName = null;
 
       for (const line of lines) {
-        // 0) Warehouse style line: "3 × (1-1-1) Pumpkin"
         const wh = parseWarehouseLine(line);
         if (wh) {
-          items.push({ name: wh.name, qty: wh.qty, raw: wh.raw, source: "warehouse" });
+          items.push({ name: wh.name, qty: wh.qty, code: wh.code, raw: wh.raw, source: "warehouse" });
           pendingName = null;
           continue;
         }
 
-        // Normalize whitespace + common punctuation
         let l = line
           .replace(/\t+/g, " ")
-          .replace(/\u00D7/g, "x")                      // × → x
-          .replace(/\u2022|\u2023|\u25E6|\u2043/g, " ") // bullets
-          .replace(/\u2013|\u2014/g, "-")               // – — → -
+          .replace(/\u00D7/g, "x")
+          .replace(/\u2022|\u2023|\u25E6|\u2043/g, " ")
+          .replace(/\u2013|\u2014/g, "-")
           .replace(/\s+/g, " ")
           .trim();
 
-        // 1) Quantity-only line: "x 2", "qty: 2"
         const qtyOnly =
           l.match(/^x\s*(\d+)\s*$/i) ||
           l.match(/^qty\s*[:=\-]?\s*(\d+)\s*$/i) ||
@@ -602,8 +695,6 @@ x 2"></textarea>
           continue;
         }
 
-        // 2) Quantity-first formats:
-        // "2 Maple Pancake" / "2 x Maple Pancake" / "2 - Maple" / "2) Maple" / "(2) Maple"
         let m =
           l.match(/^(\d+)\s*(?:x\s*)?(.+?)\s*$/i) ||
           l.match(/^(\d+)\s*[:=\-]\s*(.+)$/i) ||
@@ -620,8 +711,6 @@ x 2"></textarea>
           }
         }
 
-        // 3) Inline x formats (qty-first OR qty-last)
-        // "Maple x2", "2x Maple"
         m =
           l.match(/^(\d+)\s*x\s*(.+)$/i) ||
           l.match(/^(.+?)\s*x\s*(\d+)$/i) ||
@@ -639,8 +728,6 @@ x 2"></textarea>
           }
         }
 
-        // 4) Quantity-last with punctuation:
-        // "Maple Pancake - 2", "Maple Pancake: 2", "Maple Pancake, 2"
         m = l.match(/^(.+?)\s*[:=\-,]\s*(\d+)\s*$/);
         if (m) {
           const name = (m[1] ?? "").trim();
@@ -652,7 +739,6 @@ x 2"></textarea>
           }
         }
 
-        // 5) Quantity-last plain: "Maple Pancake 2"
         m = l.match(/^(.+?)\s+(\d+)\s*$/);
         if (m) {
           const name = (m[1] ?? "").trim();
@@ -664,7 +750,6 @@ x 2"></textarea>
           }
         }
 
-        // 6) Quantity in parentheses (last): "Maple Pancake (2)"
         m = l.match(/^(.+?)\s*\(\s*(\d+)\s*\)\s*$/);
         if (m) {
           const name = (m[1] ?? "").trim();
@@ -676,139 +761,140 @@ x 2"></textarea>
           }
         }
 
-        // 7) Bare number line used as qty for previous flavor
         if (/^\d+$/.test(l) && pendingName) {
           items.push({ name: pendingName, qty: Number(l), raw: pendingName, source: "plain" });
           pendingName = null;
           continue;
         }
 
-        // 8) Otherwise treat as flavor line (qty may follow)
         if (pendingName) items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
         pendingName = l;
       }
 
       if (pendingName) items.push({ name: pendingName, qty: 1, raw: pendingName, source: "plain" });
-
       return items;
     }
 
-    // Robust mapping: exact lookups first, fuzzy LAST.
+    /**********************
+     * Order mapper
+     * - robust: exact sheet mappings first
+     * - fuzzy LAST
+     * - counts total items in the output
+     **********************/
     function mapOrder() {
       const includeInactive = false;
       const input = document.getElementById("orderInput").value;
       const items = parseOrder(input);
 
-      const candidates = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
+      const candidates = flavors
+        .filter(f => includeInactive || f.status.toLowerCase() === "active")
+        .filter(f => !isExcludedNonFlavor(f)); // do not map shakers/scoops/etc
 
       const out = [];
       const notes = [];
+      let totalQty = 0;
 
       for (const it of items) {
         const rawLine = it.raw ?? it.name ?? "";
-
-        // Start with the provided name
         let text = it.name;
 
-        // If it’s a warehouse line, clean the warehouse item name first
-        if (it.source === "warehouse") text = cleanWarehouseItemName(text);
-// ---- Cookies & Cream rule (BEFORE aliases/fuzzy) ----
-const nText = norm(text);
-const isCookiesCream =
-  nText.includes("cookies") &&
-  nText.includes("cream"); // covers "cookies & cream" and "cookies and cream" after norm()
+        // If warehouse line, prioritize TRUE mapping via flavor_id (code in parentheses) then warehouse name
+        if (it.source === "warehouse") {
+          const byId = exactFlavorIdLookup.get(norm(it.code)) || collapsedFlavorIdLookup.get(collapse(it.code));
+          if (byId) {
+            out.push(`${it.qty} x ${byId}`);
+            totalQty += it.qty;
+            notes.push(`"${rawLine}" → "${byId}" (exact flavor_id ${it.code})`);
+            continue;
+          }
 
-if (isCookiesCream) {
-  const wantsCoffee = isCookiesCoffeeIntent(rawLine);
+          text = cleanWarehouseItemName(text);
 
-  // Helper: does a flavor look like cookies+cream?
-  const looksLikeCookiesCream = (f) => {
-    const n = norm(f.flavor_name);
-    return n.includes("cookies") && n.includes("cream");
-  };
+          const whExact = exactWarehouseLookup.get(norm(text)) || collapsedWarehouseLookup.get(collapse(text));
+          if (whExact) {
+            out.push(`${it.qty} x ${whExact}`);
+            totalQty += it.qty;
+            notes.push(`"${rawLine}" → "${whExact}" (exact warehouse name)`);
+            continue;
+          }
+        }
 
-  // Prefer matching by product/name so we return EXACT spreadsheet flavor_name (keeps "&")
-  let picked = null;
+        // ---- Cookies & Cream rule (before alias/fuzzy) ----
+        const nText = norm(text);
+        const cText = collapse(text);
+        const isCookiesCream =
+          nText === "cookies and cream" ||
+          cText === "cookiescream" ||
+          cText === "cookiesandcream";
 
-  if (wantsCoffee) {
-    // Pick coffee/protein coffee variant
-    picked = candidates.find(f => {
-      if (!looksLikeCookiesCream(f)) return false;
-      const pn = norm(f.product);
-      const fn = norm(f.flavor_name);
-      return pn.includes("coffee") || fn.includes("protein coffee") || fn.includes("coffee");
-    });
-  } else {
-    // Default to oats variant (NOT coffee)
-    picked = candidates.find(f => {
-      if (!looksLikeCookiesCream(f)) return false;
-      const pn = norm(f.product);
-      const fn = norm(f.flavor_name);
-      const isCoffee = pn.includes("coffee") || fn.includes("protein coffee") || fn.includes("coffee");
-      return !isCoffee;
-    });
-  }
+        if (isCookiesCream) {
+          if (isCookiesCoffeeIntent(rawLine)) {
+            const canonical = resolveCanonicalFlavorName("cookies & cream protein coffee");
+            out.push(`${it.qty} x ${canonical}`);
+            totalQty += it.qty;
+            notes.push(`"${rawLine}" → "${canonical}" (explicit PC/Protein Coffee)`);
+          } else {
+            const canonical = resolveCanonicalFlavorName("cookies and cream");
+            out.push(`${it.qty} x ${canonical}`);
+            totalQty += it.qty;
+            notes.push(`"${rawLine}" → "${canonical}" (default oatmeal)`);
+          }
+          continue;
+        }
 
-  if (picked) {
-    out.push(`${it.qty} x ${picked.flavor_name}`);
-    notes.push(`"${rawLine}" → "${picked.flavor_name}" (${wantsCoffee ? "explicit coffee" : "default oats"})`);
-    continue;
-  }
+        // Customer aliases only for non-warehouse
+        if (it.source !== "warehouse") {
+          text = applyCustomerAlias(text);
+        }
 
-  // If somehow not found, fall through to normal matching pipeline
-}
-
-
-        // Apply your customer alias map (only affects plain/human inputs)
-        text = applyAlias(text);
-
-        // 1) Exact match against flavor_name (normal + collapsed)
+        // 1) Exact match to flavor_name
         const exact = exactFlavorLookup.get(norm(text)) || collapsedFlavorLookup.get(collapse(text));
         if (exact) {
           out.push(`${it.qty} x ${exact}`);
+          totalQty += it.qty;
           if (norm(it.name) !== norm(exact)) notes.push(`"${rawLine}" → "${exact}" (exact flavor)`);
           continue;
         }
 
-        // 2) Exact match against warehouse_code (warehouse name) ONLY if flavor exact failed
-        const whExact =
-          exactWarehouseLookup.get(norm(text)) ||
-          collapsedWarehouseLookup.get(collapse(text));
-
-        if (whExact) {
-          out.push(`${it.qty} x ${whExact}`);
-          notes.push(`"${rawLine}" → "${whExact}" (exact warehouse_code match)`);
+        // 2) Exact match to warehouse name (even for customer text, as a second pass)
+        const whExact2 = exactWarehouseLookup.get(norm(text)) || collapsedWarehouseLookup.get(collapse(text));
+        if (whExact2) {
+          out.push(`${it.qty} x ${whExact2}`);
+          totalQty += it.qty;
+          notes.push(`"${rawLine}" → "${whExact2}" (exact warehouse name)`);
           continue;
         }
 
-        // 3) Fuzzy match against flavor_name
+        // 3) Fuzzy flavor_name
         const bestFlavor = bestFuzzyMatch(text, candidates.map(f => f.flavor_name));
         if (bestFlavor && bestFlavor.score >= 0.62) {
           out.push(`${it.qty} x ${bestFlavor.value}`);
+          totalQty += it.qty;
           if (norm(it.name) !== norm(bestFlavor.value)) {
             notes.push(`"${rawLine}" → "${bestFlavor.value}" (fuzzy flavor ${bestFlavor.score.toFixed(2)})`);
           }
           continue;
         }
 
-        // 4) Fuzzy match against warehouse_code (LAST resort)
+        // 4) Fuzzy warehouse name LAST
         const bestWarehouse = bestFuzzyMatchObj(text, candidates, f => f.warehouse_code);
         if (bestWarehouse && bestWarehouse.score >= 0.62) {
           out.push(`${it.qty} x ${bestWarehouse.obj.flavor_name}`);
-          notes.push(
-            `"${rawLine}" → "${bestWarehouse.obj.flavor_name}" (fuzzy warehouse_code "${bestWarehouse.value}" ${bestWarehouse.score.toFixed(2)})`
-          );
+          totalQty += it.qty;
+          notes.push(`"${rawLine}" → "${bestWarehouse.obj.flavor_name}" (fuzzy warehouse "${bestWarehouse.value}" ${bestWarehouse.score.toFixed(2)})`);
           continue;
         }
 
         // 5) No match
-        notes.push(
-          `No confident match for: "${rawLine}" (flavor ${(bestFlavor?.score ?? 0).toFixed(2)}, warehouse ${(bestWarehouse?.score ?? 0).toFixed(2)})`
-        );
+        notes.push(`No confident match for: "${rawLine}" (flavor ${(bestFlavor?.score ?? 0).toFixed(2)}, warehouse ${(bestWarehouse?.score ?? 0).toFixed(2)})`);
         out.push(`${it.qty} x ${it.name}  [UNMATCHED]`);
+        totalQty += it.qty;
       }
 
-      document.getElementById("orderOutput").value = out.join("\n");
+      // Prepend total count line
+      const header = `Total items: ${totalQty}`;
+      document.getElementById("orderOutput").value = [header, "", ...out].join("\n");
+
       document.getElementById("orderNotes").innerHTML = notes.length
         ? `<div><strong>Match notes</strong></div><div class="muted">${notes.map(escapeHtml).join("<br/>")}</div>`
         : `<span class="muted">All items matched cleanly.</span>`;
@@ -821,7 +907,10 @@ if (isCookiesCream) {
       const q = document.getElementById("labelFlavor").value;
       if (!q.trim()) return;
 
-      const active = flavors.filter(f => f.status.toLowerCase() === "active");
+      const active = flavors
+        .filter(f => f.status.toLowerCase() === "active")
+        .filter(f => !isExcludedNonFlavor(f));
+
       const best = bestFuzzyMatch(q, active.map(f => f.flavor_name));
       const container = document.getElementById("labelResult");
 
@@ -838,8 +927,14 @@ if (isCookiesCream) {
         return `<tr><td>${escapeHtml(k)}</td><td class="right">${v ?? ""}</td></tr>`;
       }).join("");
 
+      const veganBadge = (f.is_vegan === true) ? "Vegan" : (f.is_vegan === false ? "Non-Vegan" : "Unknown");
+
       container.innerHTML = `
-        <div><strong>${escapeHtml(f.flavor_name)}</strong> <span class="pill">${escapeHtml(f.status)}</span></div>
+        <div>
+          <strong>${escapeHtml(f.flavor_name)}</strong>
+          <span class="pill">${escapeHtml(f.status)}</span>
+          <span class="pill">${escapeHtml(veganBadge)}</span>
+        </div>
         <div class="muted">Match score: ${best.score.toFixed(2)}</div>
         <div class="grid" style="margin-top:8px;">
           <div class="card" style="padding:10px;">
@@ -856,12 +951,50 @@ if (isCookiesCream) {
 
     /**********************
      * Ingredient lookup
+     * - normal fuzzy ingredient search OR
+     * - list flavors missing a selected ingredient token
      **********************/
+    function listFlavorsMissingIngredientToken(token, includeInactive) {
+      const t = (token || "").trim().toLowerCase();
+      if (!t) return;
+
+      const pool = flavors
+        .filter(f => includeInactive || f.status.toLowerCase() === "active")
+        .filter(f => !isExcludedNonFlavor(f));
+
+      const missing = [];
+      for (const f of pool) {
+        const has = f.ingredients.some(ing => tokenSetStemmed(ing).has(t));
+        if (!has) missing.push(f);
+      }
+
+      missing.sort((a,b) => a.flavor_name.localeCompare(b.flavor_name));
+      const list = missing.map(f => {
+        const statusClass = f.status.toLowerCase()==="active" ? "statusActive" : "statusInactive";
+        const veganBadge = (f.is_vegan === true) ? "Vegan" : (f.is_vegan === false ? "Non-Vegan" : "Unknown");
+        return `<div>${escapeHtml(f.flavor_name)} <span class="${statusClass}">(${escapeHtml(f.status)})</span> <span class="pill">${escapeHtml(veganBadge)}</span></div>`;
+      }).join("");
+
+      document.getElementById("ingredientResult").innerHTML = `
+        <div><strong>${missing.length}</strong> flavors missing <span class="pill">${escapeHtml(t)}</span>.</div>
+        <div style="margin-top:10px;">${list || "<div class='muted'>(none)</div>"}</div>
+      `;
+    }
+
     function searchIngredient() {
       const qRaw = document.getElementById("ingredientQuery").value;
       const includeInactive = document.getElementById("includeInactiveIng").checked;
+      const missingToken = document.getElementById("missingIngredientSelect").value;
 
-      const pool = flavors.filter(f => includeInactive || f.status.toLowerCase() === "active");
+      // If a missing-ingredient token is chosen, run that mode
+      if (missingToken) {
+        listFlavorsMissingIngredientToken(missingToken, includeInactive);
+        return;
+      }
+
+      const pool = flavors
+        .filter(f => includeInactive || f.status.toLowerCase() === "active")
+        .filter(f => !isExcludedNonFlavor(f));
 
       const hits = [];
       const matchedVariants = new Map();
@@ -875,7 +1008,7 @@ if (isCookiesCream) {
         }
 
         if (best >= 0.58) {
-          hits.push({ flavor: f.flavor_name, status: f.status, score: best, variant: bestVariant });
+          hits.push({ flavor: f.flavor_name, status: f.status, vegan: f.is_vegan, score: best, variant: bestVariant });
           matchedVariants.set(bestVariant, (matchedVariants.get(bestVariant) || 0) + 1);
         }
       }
@@ -888,10 +1021,12 @@ if (isCookiesCream) {
         .map(([v,c]) => `<div class="pill">${escapeHtml(v)} • ${c}</div>`)
         .join(" ");
 
-      const list = hits.slice(0, 80).map(h =>
-        `<div>${escapeHtml(h.flavor)} <span class="${h.status.toLowerCase()==="active"?"statusActive":"statusInactive"}">(${escapeHtml(h.status)})</span>
-        <span class="muted">— ${escapeHtml(h.variant)} — score ${h.score.toFixed(2)}</span></div>`
-      ).join("");
+      const list = hits.slice(0, 80).map(h => {
+        const veganBadge = (h.vegan === true) ? "Vegan" : (h.vegan === false ? "Non-Vegan" : "Unknown");
+        return `<div>${escapeHtml(h.flavor)} <span class="${h.status.toLowerCase()==="active"?"statusActive":"statusInactive"}">(${escapeHtml(h.status)})</span>
+          <span class="pill">${escapeHtml(veganBadge)}</span>
+          <span class="muted">— ${escapeHtml(h.variant)} — score ${h.score.toFixed(2)}</span></div>`;
+      }).join("");
 
       document.getElementById("ingredientResult").innerHTML = `
         <div><strong>${hits.length}</strong> flavors matched “${escapeHtml(qRaw)}”.</div>
@@ -901,17 +1036,19 @@ if (isCookiesCream) {
     }
 
     /**********************
-     * Nutrition extremes
+     * Nutrition extremes (now supports Vegan filter)
      **********************/
     function computeExtremes() {
       const includeInactive = document.getElementById("includeInactiveNut").checked;
       const macro = document.getElementById("macroSelect").value;
       const filterValue = document.getElementById("productFilter").value;
+      const veganFilterValue = document.getElementById("veganFilter").value;
 
       let pool = flavors.slice();
       pool = pool.filter(f => !isExcludedNonFlavor(f));
       pool = pool.filter(f => includeInactive || f.status.toLowerCase() === "active");
       pool = pool.filter(f => productPassesFilter(f, filterValue));
+      pool = pool.filter(f => veganPassesFilter(f, veganFilterValue));
 
       if (!macro) {
         document.getElementById("extremes").innerHTML = `<div class="muted">Select a macro/nutrient.</div>`;
@@ -919,7 +1056,7 @@ if (isCookiesCream) {
       }
 
       const vals = pool
-        .map(f => ({ name: f.flavor_name, v: f.nutrition[macro], status: f.status }))
+        .map(f => ({ name: f.flavor_name, v: f.nutrition[macro], vegan: f.is_vegan }))
         .filter(x => typeof x.v === "number");
 
       if (!vals.length) {
@@ -932,9 +1069,14 @@ if (isCookiesCream) {
       const least = vals.slice(0, 10);
       const most = vals.slice(-10).reverse();
 
-      const fmt = (arr) => arr.map(x =>
-        `<div>${escapeHtml(x.name)} <span class="muted">(${x.v})</span></div>`
-      ).join("");
+      const fmt = (arr) => arr.map(x => {
+        const veganBadge = (x.vegan === true) ? "Vegan" : (x.vegan === false ? "Non-Vegan" : "Unknown");
+        return `<div>${escapeHtml(x.name)} <span class="muted">(${x.v})</span> <span class="pill">${escapeHtml(veganBadge)}</span></div>`;
+      }).join("");
+
+      const veganLabel =
+        veganFilterValue === "vegan" ? "Vegan only" :
+        veganFilterValue === "nonvegan" ? "Non-Vegan only" : "All";
 
       document.getElementById("extremes").innerHTML = `
         <div class="card" style="padding:10px;">
@@ -943,7 +1085,7 @@ if (isCookiesCream) {
             <span class="pill">top/bottom 10</span>
           </div>
           <div class="muted" style="margin-top:4px;">
-            Filter: ${escapeHtml(filterValue)} • ${includeInactive ? "including inactive" : "active only"} • excluding shakers/scoops
+            Filter: ${escapeHtml(filterValue)} • Vegan: ${escapeHtml(veganLabel)} • ${includeInactive ? "including inactive" : "active only"} • excluding shakers/scoops
           </div>
           <div class="grid" style="margin-top:10px;">
             <div><div class="muted">Least</div>${fmt(least)}</div>
@@ -954,11 +1096,15 @@ if (isCookiesCream) {
     }
 
     /**********************
-     * Table rendering (sortable)
+     * Table rendering (sortable) - adds Vegan column
      **********************/
     function renderTable() {
       const q = norm(document.getElementById("tableSearch").value);
       let view = flavors.slice();
+      const productFilter = document.getElementById("tableProductFilter")?.value || "all";
+      const veganFilter = document.getElementById("tableVeganFilter")?.value || "all";
+      const statusFilter = document.getElementById("tableStatusFilter")?.value || "all";
+
 
       // Only show flavors with at least one nutrition value
       view = view.filter(f => nutritionCols.some(k => typeof f.nutrition[k] === "number"));
@@ -983,11 +1129,25 @@ if (isCookiesCream) {
         if (typeof av === "number" && typeof bv === "number") return (av - bv) * mul;
         return av.toString().localeCompare(bv.toString()) * mul;
       });
+// Filter: Status
+if (statusFilter !== "all") {
+  view = view.filter(f => {
+    const s = (f.status || "").toString().toLowerCase();
+    return statusFilter === "active" ? s === "active" : s !== "active";
+  });
+}
+
+// Filter: Product (oats/coffee)
+view = view.filter(f => productPassesFilter(f, productFilter));
+
+// Filter: Vegan
+view = view.filter(f => veganPassesFilter(f, veganFilter));
 
       const cols = [
         { key: "status", label: "Status" },
         { key: "flavor_name", label: "Flavor" },
         { key: "product", label: "Product" },
+        { key: "is_vegan", label: "Vegan" },
         ...nutritionCols.map(c => ({ key: `nutrition.${c}`, label: c })),
       ];
 
@@ -999,9 +1159,13 @@ if (isCookiesCream) {
 
       const tbody = view.slice(0, 500).map(f => {
         const statusClass = f.status.toLowerCase()==="active" ? "statusActive" : "statusInactive";
+        const veganBadge = (f.is_vegan === true) ? "Vegan" : (f.is_vegan === false ? "Non-Vegan" : "");
         const tds = cols.map(c => {
           if (c.key === "status") {
             return `<td><span class="${statusClass}">${escapeHtml(f.status)}</span></td>`;
+          }
+          if (c.key === "is_vegan") {
+            return `<td>${veganBadge ? `<span class="pill">${escapeHtml(veganBadge)}</span>` : ""}</td>`;
           }
           if (c.key.startsWith("nutrition.")) {
             const k = c.key.split(".")[1];
@@ -1067,14 +1231,32 @@ if (isCookiesCream) {
     document.getElementById("lookupLabel").addEventListener("click", lookupLabel);
     document.getElementById("searchIngredient").addEventListener("click", searchIngredient);
     document.getElementById("calcExtremes").addEventListener("click", computeExtremes);
+    document.getElementById("tableProductFilter").addEventListener("change", renderTable);
+    document.getElementById("tableVeganFilter").addEventListener("change", renderTable);
+    document.getElementById("tableStatusFilter").addEventListener("change", renderTable);
+
 
     document.getElementById("macroSelect").addEventListener("change", computeExtremes);
     document.getElementById("productFilter").addEventListener("change", computeExtremes);
+    document.getElementById("veganFilter").addEventListener("change", computeExtremes);
     document.getElementById("includeInactiveNut").addEventListener("change", computeExtremes);
 
     document.getElementById("tableSearch").addEventListener("input", renderTable);
     document.getElementById("labelFlavor").addEventListener("keydown", (e) => { if (e.key === "Enter") lookupLabel(); });
     document.getElementById("ingredientQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") searchIngredient(); });
+
+    // If user picks a missing-ingredient token, clear search box and run
+    document.getElementById("missingIngredientSelect").addEventListener("change", () => {
+      document.getElementById("ingredientQuery").value = "";
+      searchIngredient();
+    });
+
+    // If user types, clear missing-ingredient mode
+    document.getElementById("ingredientQuery").addEventListener("input", () => {
+      if (document.getElementById("ingredientQuery").value.trim()) {
+        document.getElementById("missingIngredientSelect").value = "";
+      }
+    });
 
     // Initial state
     document.getElementById("refreshData").disabled = false;
